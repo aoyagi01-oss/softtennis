@@ -65,6 +65,11 @@ function norm_(v) {
   return String(v == null ? '' : v).normalize('NFKC').trim();
 }
 
+// cell_() で先頭に付けた「'」を外して読む（「-」（決着なし）などが「'-」のまま読まれないように）
+function uncell_(v) {
+  return norm_(v).replace(/^'(?=[=+\-@])/, '');
+}
+
 function checkPassword_(key) {
   if (PASSWORD === 'ここを部の合言葉に変える') throw new Error('Apps Script の PASSWORD（部の合言葉）がまだ設定されていません');
   if (norm_(key) !== norm_(PASSWORD)) throw new Error('合言葉がちがいます');
@@ -149,7 +154,7 @@ function readAll_(def) {
     const o = {};
     def.keys.forEach(function (k) {
       const v = cols[k] === undefined ? '' : r[cols[k]];
-      o[k] = k === 'date' ? normDate_(v) : isDate_(v) ? Utilities.formatDate(v, tz_(), 'yyyy-MM-dd HH:mm:ss') : norm_(v);
+      o[k] = k === 'date' ? normDate_(v) : isDate_(v) ? Utilities.formatDate(v, tz_(), 'yyyy-MM-dd HH:mm:ss') : uncell_(v);
     });
     return o;
   }).filter(function (o) { return o.id; });
@@ -158,7 +163,7 @@ function readAll_(def) {
 // スプレッドシートの式として読まれないように
 function cell_(v) {
   const s = String(v == null ? '' : v);
-  return /^[=+\-@]/.test(s) ? "'" + s : s;
+  return /^[=+\-@]/.test(s) && s !== '-' ? "'" + s : s;
 }
 
 function append_(def, rows) {
@@ -182,7 +187,7 @@ function findRow_(def, id) {
   const cols = columns_(sh, def);
   const ids = sh.getRange(1, cols.id + 1, sh.getLastRow(), 1).getValues();
   for (let i = 1; i < ids.length; i++) {
-    if (norm_(ids[i][0]) === id) return { sh: sh, cols: cols, row: i + 1 };
+    if (uncell_(ids[i][0]) === id) return { sh: sh, cols: cols, row: i + 1 };
   }
   return null;
 }
@@ -247,7 +252,7 @@ function addMatch_(m) {
 function deleteMatch_(id, device, isAdmin) {
   const f = findRow_(MATCH_SHEET, norm_(id));
   if (!f) return { deleted: false };
-  const rowDevice = norm_(f.sh.getRange(f.row, f.cols.device + 1).getValue());
+  const rowDevice = uncell_(f.sh.getRange(f.row, f.cols.device + 1).getValue());
   if (!isAdmin && (!device || rowDevice !== norm_(device))) throw new Error('この試合は入力した端末か先生しか消せません');
   f.sh.deleteRow(f.row);
   return { deleted: true };
@@ -293,6 +298,11 @@ function importPlayers_(rows) {
   const all = readAll_(PLAYER_SHEET);
   const byKey = {};
   all.forEach(function (x) { byKey[playerKey_(x)] = x; });
+  // 学年を直すときに使う：ID → シートの行番号（1行ずつ探し直すと遅いので、先にまとめて調べておく）
+  const sh = sheet_(PLAYER_SHEET);
+  const cols = columns_(sh, PLAYER_SHEET);
+  const rowOf = {};
+  sh.getRange(1, cols.id + 1, sh.getLastRow(), 1).getValues().forEach(function (r, i) { if (i) rowOf[uncell_(r[0])] = i + 1; });
   const add = [], errors = [];
   let updated = 0;
   rows.forEach(function (r, i) {
@@ -302,7 +312,11 @@ function importPlayers_(rows) {
       const key = playerKey_(row);
       const same = byKey[key];
       if (same) {
-        if (row.grade && row.grade !== same.grade) { updatePlayer_({ id: same.id, grade: row.grade }); updated++; }
+        if (row.grade && row.grade !== same.grade && rowOf[same.id] && cols.grade !== undefined) {
+          sh.getRange(rowOf[same.id], cols.grade + 1).setNumberFormat('@').setValue(row.grade);
+          same.grade = row.grade;
+          updated++;
+        }
         return;
       }
       byKey[key] = row;

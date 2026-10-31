@@ -147,10 +147,15 @@ function pName(id, fallback) {
 }
 
 // 1試合を「A側（入力した自校のペア）」「B側（相手）」に分けて扱う
+// 名前は今の名簿の名前を使う（名簿で名前を直したら、過去の試合も新しい名前で出る）
+function slotNames(names, ids) {
+  return names.map((n, i) => (ids[i] && DB.byId.has(ids[i]) ? DB.byId.get(ids[i]).name : n)).filter(Boolean);
+}
+
 function sidesOf(m) {
   return [
-    { ids: [m.my1Id, m.my2Id].filter(Boolean), names: [m.my1, m.my2].filter(Boolean), school: DB.home, res: m.result },
-    { ids: [m.opp1Id, m.opp2Id].filter(Boolean), names: [m.opp1, m.opp2].filter(Boolean), school: m.oppSchool, res: m.result === '勝' ? '負' : m.result === '負' ? '勝' : '-' }
+    { ids: [m.my1Id, m.my2Id].filter(Boolean), names: slotNames([m.my1, m.my2], [m.my1Id, m.my2Id]), school: DB.home, res: m.result },
+    { ids: [m.opp1Id, m.opp2Id].filter(Boolean), names: slotNames([m.opp1, m.opp2], [m.opp1Id, m.opp2Id]), school: m.oppSchool, res: m.result === '勝' ? '負' : m.result === '負' ? '勝' : '-' }
   ];
 }
 
@@ -177,13 +182,15 @@ function counts(m, withAbort) {
   return m.result !== '-' && (withAbort || m.end !== '打ち切り');
 }
 
+// よく組むペア（ペアが変わったときにすぐ切りかわるよう、最近の20試合で数える）
 function partnerFreq(meId) {
   const c = new Map();
-  DB.matches.forEach(m => {
-    const s = sideOf(m, meId);
-    if (!s) return;
-    s.me.ids.forEach(id => { if (id !== meId && id !== UNKNOWN) c.set(id, (c.get(id) || 0) + 1); });
-  });
+  DB.matches.filter(m => sideOf(m, meId))
+    .sort((a, b) => (b.date + (b.createdAt || '')).localeCompare(a.date + (a.createdAt || '')))
+    .slice(0, 20)
+    .forEach(m => {
+      sideOf(m, meId).me.ids.forEach(id => { if (id !== meId && id !== UNKNOWN) c.set(id, (c.get(id) || 0) + 1); });
+    });
   return c;
 }
 
@@ -198,7 +205,7 @@ function oppPairFreq(school, gender) {
   DB.matches.forEach(m => {
     if (m.gender !== gender) return;
     sidesOf(m).forEach(s => {
-      if (s.school !== school || s.ids.length !== 2 || s.ids.includes(UNKNOWN)) return;
+      if (s.school !== school || s.ids.length !== 2 || s.ids.some(id => !DB.byId.has(id) || !isActive(DB.byId.get(id)))) return;
       const k = s.ids.slice().sort().join('+');
       c.set(k, (c.get(k) || 0) + 1);
     });
@@ -218,28 +225,47 @@ function recentTournaments() {
 
 function pending() { return store.get('pending', []); }
 
+// 試合の中身がおかしくて、何回送っても登録できないエラーか（それ以外のエラーは送信待ちに残して、あとで送り直す）
+function isBadMatchError(e) {
+  return !!e.server && /選んでください|試合の内容|性別は/.test(e.message);
+}
+
+function addLocalMatch(m) {
+  if (!DB.matches.some(x => x.id === m.id)) DB.matches.push(m);
+  reindex();
+}
+
 function setPending(list) {
   store.set('pending', list);
   renderSync();
 }
 
+let flushing = false;
+
 async function flushPending() {
-  for (const m of pending()) {
-    try {
-      const r = await callApi('addMatch', { data: m });
-      setPending(pending().filter(x => x.id !== m.id));
-      if (!DB.matches.some(x => x.id === r.match.id)) DB.matches.push(r.match);
-      reindex();
-    } catch (e) {
-      if (e.server) {
+  if (flushing || !pending().length) return;
+  flushing = true;
+  let sent = 0;
+  try {
+    for (const m of pending()) {
+      try {
+        const r = await callApi('addMatch', { data: m });
         setPending(pending().filter(x => x.id !== m.id));
-        alert('送信できなかった試合があります：' + e.message);
-      } else {
-        break;
+        addLocalMatch(r.match);
+        sent++;
+      } catch (e) {
+        if (isBadMatchError(e)) {
+          setPending(pending().filter(x => x.id !== m.id));
+          alert('送信できなかった試合があります：' + e.message);
+        } else {
+          break;
+        }
       }
     }
+  } finally {
+    flushing = false;
   }
-  renderRecent();
+  if (sent) { toast('送信待ちの試合を ' + sent + ' 件送りました'); renderTab(); } else renderRecent();
 }
 
 function renderSync(msg) {
@@ -265,6 +291,8 @@ function showTab(tab) {
   $('#login').hidden = true;
   renderTab();
   window.scrollTo(0, 0);
+  // ほかの人が入力した試合も見えるよう、1分以上たっていたら読み直す
+  if (tab !== 'entry' && lastLoad && Date.now() - lastLoad > 60000) refresh();
 }
 
 function renderTab() {
@@ -278,10 +306,14 @@ function showLogin(msg) {
   $('#login-key').focus();
 }
 
+let lastLoad = 0;
+
 async function refresh() {
   try {
     const d = await callApi('data');
     setData(d);
+    lastLoad = Date.now();
+    if (!F.me && !F.fromPdf) loadMe();
     renderSync();
     renderTab();
     flushPending();
@@ -297,17 +329,25 @@ async function refresh() {
 
 // ═════════ 試合入力 ═════════
 
+// 同じ日にアプリを開き直しても、大会名と試合の形式（何ゲームか）は残す
+const DAY = store.get('day', {});
+const sameDay = DAY.date === today();
+
 const F = {
   date: today(),
-  tournament: '',
+  tournament: sameDay ? DAY.tournament || '' : '',
   event: store.get('event', 'ダブルス'),
   gender: store.get('gender', '男子'),
   me: '', partner: '', school: '', opp: ['', ''],
-  format: 7, end: '', myG: null, opG: null, fMy: '', fOp: '', result: '',
+  format: sameDay && DAY.format ? DAY.format : 7, end: '', myG: null, opG: null, fMy: '', fOp: '', result: '',
   edit: {}, schoolQ: '', fromPdf: null
 };
 
 const pairSize = () => (F.event === 'シングルス' ? 1 : 2);
+
+function saveDay() {
+  if (F.date === today()) store.set('day', { date: F.date, tournament: F.tournament.trim(), format: F.format });
+}
 
 function loadMe() {
   const id = store.get('me_' + F.gender, '');
@@ -391,8 +431,9 @@ function renderMe() {
   $('#e-partner').innerHTML = ph;
 }
 
-function schoolLabel(s) {
-  return s === DB.home ? '部内（自校対決）' : s;
+// mySchool：見ている側の学校（ほかの学校の選手から見た自校は「部内」ではなく学校名で出す）
+function schoolLabel(s, mySchool) {
+  return s === DB.home && (mySchool === undefined || mySchool === DB.home) ? '部内（自校対決）' : s;
 }
 
 function renderSchool() {
@@ -533,16 +574,15 @@ async function submitMatch(btn) {
   try {
     const r = await callApi('addMatch', { data: m });
     setPending(pending().filter(x => x.id !== m.id));
-    DB.matches.push(r.match);
-    reindex();
+    addLocalMatch(r.match);
     toast('登録しました（' + (m.result === '勝' ? '勝ち' : m.result === '負' ? '負け' : '決着なし') + ' ' + scoreText(m) + '）');
     afterSubmit();
   } catch (e) {
-    if (e.server) {
+    if (isBadMatchError(e)) {
       setPending(pending().filter(x => x.id !== m.id));
       alert('登録できませんでした：' + e.message);
     } else {
-      toast('電波が弱いので「送信待ち」にしました。つながったら自動で送ります', 4000);
+      toast(e.server ? '登録できなかったので「送信待ち」にしました（' + e.message + '）' : '電波が弱いので「送信待ち」にしました。つながったら自動で送ります', 4000);
       afterSubmit();
     }
   } finally {
@@ -554,6 +594,8 @@ async function submitMatch(btn) {
 // 続けて入力しやすいよう、日付・大会・自分たちのペア・相手校は残す
 function afterSubmit() {
   if (F.fromPdf) { pdfState.done.add(F.fromPdf.key); }
+  saveDay();
+  dailyDate = F.date;
   F.opp = ['', ''];
   F.myG = F.opG = null;
   F.fMy = F.fOp = '';
@@ -573,7 +615,7 @@ function matchLine(m, opts) {
   const res = persp.me.res;
   const mark = res === '勝' ? '<span class="res w">○</span>' : res === '負' ? '<span class="res l">●</span>' : '<span class="res">△</span>';
   return '<div class="match">' + mark + '<div class="body">' +
-    '<div>' + esc(sideLabel(persp.me)) + ' <span class="muted">vs</span> ' + esc(sideLabel(persp.them)) + ' <span class="muted">（' + esc(schoolLabel(persp.them.school)) + '）</span></div>' +
+    '<div>' + esc(sideLabel(persp.me)) + ' <span class="muted">vs</span> ' + esc(sideLabel(persp.them)) + ' <span class="muted">（' + esc(schoolLabel(persp.them.school, persp.me.school)) + '）</span></div>' +
     '<div class="meta">' + esc(dateLabel(m.date)) + ' ' + esc(m.tournament || '') + (m.format && m.format !== '7' && m.format !== 7 ? ' ・' + m.format + 'ゲーム' : '') + (m.event === 'シングルス' ? ' ・シングルス' : '') + '</div>' +
     '</div><div class="sc">' + esc(scoreText(m, flip)) + (m.end ? '<span class="tag">打ち切り</span>' : '') + (opts.pending ? '<span class="tag pending">送信待ち</span>' : '') + '</div>' +
     (opts.del ? '<button class="btn small danger" data-act="delMatch" data-v="' + esc(m.id) + '">消す</button>' : '') + '</div>';
@@ -620,7 +662,7 @@ async function addPlayerQuick(school, gender, defaultName) {
 
 async function onEntryAction(act, v, btn) {
   switch (act) {
-    case 'tournament': F.tournament = v; $('#e-tournament').value = v; break;
+    case 'tournament': F.tournament = v; $('#e-tournament').value = v; saveDay(); break;
     case 'event':
       F.event = v; store.set('event', v);
       if (v === 'シングルス') { F.partner = ''; F.opp[1] = ''; } else autoPartner();
@@ -633,16 +675,17 @@ async function onEntryAction(act, v, btn) {
       break;
     case 'edit': F.edit[v] = true; break;
     case 'me':
+      // 自分を変えたら、その人がよく組むペアを入れ直す
+      if (F.me !== v || F.partner === v) F.partner = '';
       F.me = v; store.set('me_' + F.gender, v);
-      F.edit.me = false;
-      if (F.partner === v) F.partner = '';
+      F.edit.me = false; F.edit.partner = false;
       autoPartner();
       break;
     case 'partner': F.partner = v; F.edit.partner = false; break;
     case 'addHome': {
       const id = await addPlayerQuick(DB.home, F.gender);
       if (!id) return;
-      if (v === 'me') { F.me = id; store.set('me_' + F.gender, id); F.edit.me = false; } else { F.partner = id; F.edit.partner = false; }
+      if (v === 'me') { F.me = id; F.partner = ''; store.set('me_' + F.gender, id); F.edit.me = false; autoPartner(); } else { F.partner = id; F.edit.partner = false; }
       break;
     }
     case 'school':
@@ -673,7 +716,7 @@ async function onEntryAction(act, v, btn) {
       onEntryAction('opp', id);
       return;
     }
-    case 'format': F.format = +v; F.myG = F.opG = null; F.fMy = F.fOp = ''; F.result = ''; break;
+    case 'format': F.format = +v; F.myG = F.opG = null; F.fMy = F.fOp = ''; F.result = ''; saveDay(); break;
     case 'end': F.end = v; F.myG = F.opG = null; F.fMy = F.fOp = ''; F.result = ''; break;
     case 'score': {
       const [a, b] = v.split('-').map(Number);
@@ -773,12 +816,18 @@ function wlTable(title, map, labelFn) {
 }
 
 function openSheet(html) {
+  // スマホの「戻る」で、アプリを閉じずにこの画面だけ閉じるように
+  if ($('#sheet').hidden) { try { history.pushState({ sheet: 1 }, ''); } catch (e) { /* 使えなくても動く */ } }
   $('#sheet-body').innerHTML = html;
   $('#sheet').hidden = false;
   $('.sheet-in').scrollTop = 0;
 }
 
-function closeSheet() { $('#sheet').hidden = true; }
+function closeSheet(fromBack) {
+  if ($('#sheet').hidden) return;
+  $('#sheet').hidden = true;
+  if (!fromBack && history.state && history.state.sheet) history.back();
+}
 
 function detailHtml(title, sub, ms, perspId, groupers) {
   let w = 0, l = 0;
@@ -811,8 +860,8 @@ function openPlayer(id) {
   if (!p) return;
   const ms = statMatches(true).filter(m => sideOf(m, id));
   openSheet(detailHtml(p.name, p.school + ' ' + p.gender + ' ' + gradeText(p), ms, m => sideOf(m, id), [
-    { title: 'ペア別', key: s => s.me.ids.filter(x => x !== id).join('+') || (s.me.ids.length === 1 ? 'シングルス' : ''), label: k => (k === 'シングルス' ? 'シングルス' : pName(k)), act: '' },
-    { title: '相手校別', key: s => s.them.school, label: schoolLabel },
+    { title: 'ペア別', key: (s, m) => (m.event === 'シングルス' ? 'シングルス' : s.me.ids.filter(x => x !== id).join('+') || UNKNOWN), label: k => (k === 'シングルス' ? 'シングルス' : pName(k)), act: '' },
+    { title: '相手校別', key: s => s.them.school, label: k => schoolLabel(k, p.school) },
     { title: '対戦相手別', key: s => (s.them.ids.length ? s.them.ids.slice().sort().join('+') : ''), label: k => k.split('+').map(x => pName(x)).join('・') }
   ]));
 }
@@ -822,7 +871,7 @@ function openPair(key) {
   const ms = statMatches(true).filter(m => sidesOf(m).some(s => s.ids.length === 2 && s.ids.slice().sort().join('+') === key));
   const p = DB.byId.get(ids[0]);
   openSheet(detailHtml(ids.map(x => pName(x)).join('・'), (p ? p.school + ' ' + p.gender : ''), ms, m => sideOf(m, ids[0]), [
-    { title: '相手校別', key: s => s.them.school, label: schoolLabel },
+    { title: '相手校別', key: s => s.them.school, label: k => schoolLabel(k, p ? p.school : DB.home) },
     { title: '対戦相手別', key: s => (s.them.ids.length ? s.them.ids.slice().sort().join('+') : ''), label: k => k.split('+').map(x => pName(x)).join('・') }
   ]));
 }
@@ -909,7 +958,7 @@ function renderPlayers() {
       '<button class="btn wide" data-act="importText">取り込む</button>' +
       '<div class="label" style="margin-top:14px">新年度になったら</div>' +
       '<button class="btn wide" data-act="promote">自校の学年を1つ上げる（3年生は「引退」にする）</button>' +
-      '<p id="admin-msg" class="muted"></p>' +
+      '<p id="admin-msg" class="muted">' + esc(adminMsg) + '</p>' +
       '<button class="link" data-act="adminLogout">先生用メニューを閉じる</button>'
     : '<h3>先生用</h3><p class="muted">名簿の一括取込・選手の修正・学年の繰り上げは、先生用の合言葉で使えます。</p><button class="btn" data-act="adminLogin">先生用の合言葉を入れる</button>';
 }
@@ -931,16 +980,23 @@ function parseRoster(text) {
   return rows;
 }
 
+let adminMsg = '';
+
+function setAdminMsg(t) {
+  adminMsg = t;
+  const el = $('#admin-msg');
+  if (el) el.textContent = t;
+}
+
 async function importRows(rows) {
-  const msg = $('#admin-msg');
   let added = 0, updated = 0;
   const errors = [];
   for (let i = 0; i < rows.length; i += 40) {
-    msg.textContent = '取り込み中… ' + i + ' / ' + rows.length;
+    setAdminMsg('取り込み中… ' + i + ' / ' + rows.length);
     const r = await callApi('importPlayers', { data: rows.slice(i, i + 40) });
     added += r.added; updated += r.updated; errors.push(...r.errors);
   }
-  msg.textContent = '取り込みました：新しく ' + added + ' 人、学年の更新 ' + updated + ' 人' + (errors.length ? '。取り込めなかった行：' + errors.join('、') : '');
+  setAdminMsg('取り込みました：新しく ' + added + ' 人、学年の更新 ' + updated + ' 人' + (errors.length ? '。取り込めなかった行：' + errors.join('、') : ''));
   await refresh();
 }
 
@@ -989,6 +1045,7 @@ async function onPlayersAction(act, v) {
       case 'importR8': {
         if (!confirm('令和8年度 石川県高校新人大会（ソフトテニス）の組み合わせから作った名簿を取り込みます。よろしいですか？')) return;
         const res = await fetch('data/r8-shinjin.tsv');
+        if (!res.ok) throw new Error('名簿のファイルを読み込めませんでした');
         await importRows(parseRoster(await res.text()));
         break;
       }
@@ -997,7 +1054,7 @@ async function onPlayersAction(act, v) {
         if (!rows.length) { toast('取り込む行がありません'); return; }
         if (!confirm(rows.length + ' 人を取り込みます。よろしいですか？')) return;
         await importRows(rows);
-        $('#import-text').value = '';
+        if ($('#import-text')) $('#import-text').value = '';
         break;
       }
       case 'promote': {
@@ -1286,7 +1343,7 @@ function init() {
 
   $('#login-key').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
   $('#e-date').addEventListener('change', e => { F.date = e.target.value; renderSummary(); });
-  $('#e-tournament').addEventListener('input', e => { F.tournament = e.target.value; });
+  $('#e-tournament').addEventListener('input', e => { F.tournament = e.target.value; saveDay(); });
   $('#e-tournament').addEventListener('change', () => { $('#e-tournaments').innerHTML = recentTournaments().slice(0, 6).map(t => chip('tournament', t, t, { on: t === F.tournament })).join(''); });
   document.addEventListener('input', e => {
     if (e.target.id === 'e-school-q') { F.schoolQ = e.target.value; renderSchoolResults(); }
@@ -1303,6 +1360,12 @@ function init() {
   $('#pl-show-retired').addEventListener('change', e => { P.retired = e.target.checked; renderPlayers(); });
   $('#pdf-file').addEventListener('change', e => { if (e.target.files[0]) readPdf(e.target.files[0]); });
   window.addEventListener('online', flushPending);
+  window.addEventListener('popstate', () => closeSheet(true));
+  // アプリに戻ってきたとき：送信待ちを送り、しばらくたっていれば最新の情報を読み込む
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !store.get('key')) return;
+    if (Date.now() - lastLoad > 120000) refresh(); else flushPending();
+  });
 
   renderSync();
   if (!store.get('key')) { showLogin(); return; }

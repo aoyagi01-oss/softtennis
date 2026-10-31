@@ -19,7 +19,12 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { -webkit-text-size-adjust: 100%; }
+html {
+  -webkit-text-size-adjust: 100%;
+  /* 上の見出し（タブ）と下の「登録する」に、選んだ欄が隠れないように */
+  scroll-padding-top: 120px;
+  scroll-padding-bottom: 140px;
+}
 
 body {
   margin: 0;
@@ -46,7 +51,7 @@ button, input, select { font: inherit; color: inherit; }
   align-items: center;
   padding: 8px 16px 4px;
 }
-.top h1 { font-size: 1rem; margin: 0; flex: 1; font-weight: 700; }
+.top h1 { font-size: 1rem; margin: 0; flex: 1; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .top .icon-btn { color: #fff; }
 
 .tabs {
@@ -98,7 +103,9 @@ main {
 .fld { display: block; margin: 0 0 10px; min-width: 0; }
 .fld > span { display: block; font-size: .82rem; color: var(--muted); font-weight: 700; margin-bottom: 4px; }
 input[type=text], input:not([type]), input[type=date], input[type=search], input[type=password], input[type=number], select, textarea {
+  display: block;
   width: 100%;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px 12px;
@@ -107,6 +114,8 @@ input[type=text], input:not([type]), input[type=date], input[type=search], input
   font-size: 16px;
 }
 textarea { min-height: 120px; font-family: inherit; }
+input[type=date]::-webkit-date-and-time-value { text-align: left; }
+input[type=file] { display: block; width: 100%; max-width: 100%; min-height: 44px; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .row2 > * { min-width: 0; }
 .check { display: flex; align-items: center; gap: 8px; font-size: .9rem; margin-top: 6px; }
@@ -202,8 +211,8 @@ textarea { min-height: 120px; font-family: inherit; }
 .final-box { background: var(--warn-soft); border-radius: 12px; padding: 10px; margin-top: 4px; }
 .nums { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .nums .chip { min-width: 46px; min-height: 44px; }
-.vs-inputs { display: flex; align-items: center; gap: 8px; }
-.vs-inputs input { width: 80px; text-align: center; }
+.vs-inputs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vs-inputs input { width: 72px; text-align: center; }
 
 .submit-bar {
   position: sticky;
@@ -213,6 +222,8 @@ textarea { min-height: 120px; font-family: inherit; }
   margin-top: 4px;
   z-index: 5;
 }
+/* 文字を入力している間は、キーボードの上に「登録する」が重ならないようにする */
+main:has(input:focus) .submit-bar { position: static; }
 .summary { font-size: .92rem; text-align: center; min-height: 1.4em; margin-bottom: 4px; }
 .summary .w { color: var(--win); font-weight: 700; }
 .summary .l { color: var(--lose); font-weight: 700; }
@@ -255,7 +266,7 @@ details.card summary { cursor: pointer; font-weight: 700; }
 .day-player:first-of-type { border-top: 0; }
 .day-player .head { display: flex; justify-content: space-between; font-weight: 800; }
 .day-player .wl { color: var(--muted); }
-.day-player .m { font-size: .88rem; padding-left: 1em; }
+.day-player .m { font-size: .88rem; padding-left: 2.2em; text-indent: -1.2em; }
 .day-player .m .w { color: var(--win); font-weight: 700; }
 .day-player .m .l { color: var(--lose); font-weight: 700; }
 
@@ -292,13 +303,27 @@ details.card summary { cursor: pointer; font-weight: 700; }
   width: 100%;
   max-width: 720px;
   max-height: 92vh;
+  max-height: 92dvh;
   overflow-y: auto;
+  overscroll-behavior: contain;
   border-radius: 18px 18px 0 0;
   padding: 16px 12px calc(24px + env(safe-area-inset-bottom));
   position: relative;
 }
-.sheet .close { position: absolute; right: 8px; top: 8px; }
-.sheet h2 { margin: 0 40px 4px 4px; font-size: 1.2rem; }
+/* 下までスクロールしても「✕」が押せるように、上に貼りつける */
+.sheet .close {
+  position: sticky;
+  top: 0;
+  float: right;
+  margin: -8px -4px 0 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .92);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .15);
+  z-index: 2;
+}
+.sheet h2 { margin: 0 48px 4px 4px; font-size: 1.2rem; }
 .big-stat { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0; }
 .big-stat div { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 8px; text-align: center; }
 .big-stat b { display: block; font-size: 1.3rem; }
@@ -307,7 +332,8 @@ details.card summary { cursor: pointer; font-weight: 700; }
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(90px + env(safe-area-inset-bottom));
+  bottom: calc(150px + env(safe-area-inset-bottom));
+  pointer-events: none; /* 下のボタンを押すじゃまをしない */
   transform: translateX(-50%);
   background: #1c2421;
   color: #fff;
@@ -323,11 +349,14 @@ details.card summary { cursor: pointer; font-weight: 700; }
 
 @media (max-width: 420px) {
   .chips { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); }
+  .top h1 { font-size: .92rem; }
+  .tabs { padding: 0 2px; }
+  .tabs button { flex: 1 1 auto; padding: 8px 6px 10px; font-size: .9rem; }
   .row2 { grid-template-columns: 1fr; gap: 0; }
 }
 
 @media print {
-  .top, .no-print, .sync { display: none !important; }
+  .top, .no-print, .sync, .toast { display: none !important; }
   body { background: #fff; }
   main { max-width: none; padding: 0; }
   .card { border: 0; padding: 0; break-inside: avoid; }
